@@ -1,0 +1,72 @@
+# 載入套件及設定路徑
+```{r}
+install.packages('crosstable') 
+install.packages('DescTools') # Breslow Data test
+library('crosstable')
+setwd("C:/Users/User/OneDrive/桌面/統計研習營/類別資料分析") 
+```
+
+# Step 1
+```{r}
+mushroom = read.table(file = 'mrs.csv', sep = ',', header = TRUE) 
+mr.df = data.frame(mushroom)
+
+ct = table(mushroom[, 2], mushroom[, 1]) 
+ct.ct = chisq.test(ct)
+
+crosstable(mr.df, cap_surface, by = class) %>% as_flextable(keep_id=TRUE)
+```
+
+# 3-way contingency table
+```{r}
+library(DescTools)
+three_way = xtabs(~ bruises + class + cap_surface , data = mr.df)
+c(ftable(three_way))
+
+rowp = matrix(0, nrow = 4, ncol = 3)
+for(i in 1:4){
+  rowp[i, ] = ftable(three_way)[i,]/(sum(ftable(three_way)[i,]))
+}
+rowp
+BD.test.data = xtabs(freq ~., cbind(expand.grid(
+  bruises = c('f', 't'),
+  class = c('e', 'p')),
+  cap_surface = c('f', 's', 'y'),
+  freq = c(340, 696, 712, 0, 336, 184, 48, 332, 32, 976, 679, 143))
+)
+BreslowDayTest(BD.test.data)
+```
+
+# Horse shoe crab
+```{r}
+hscrab = read.table(file = 'crab.dat')
+
+hscrab[, 6] = ifelse(hscrab[,4] >0, 1, 0) 
+hscrab[, 5] = hscrab[, 5]/100
+hscrab[, 7] = ifelse(hscrab[, 1] == 2 | hscrab[, 1] == 3, 1, 0)
+
+colnames(hscrab) = c('Color', 'Spine', 'Weight', 'Sat', 'Width', 'Y',
+'Light')
+
+hscrab2 = data.frame(hscrab)
+
+# Logistic model
+glm(Y ~ Width, family = "binomial", data = hscrab2)
+glm(Y ~ factor(Light), family = "binomial", data = hscrab2)
+glm(Y ~ factor(Color), family = "binomial", data = hscrab2)
+
+glm(Y ~ Width + factor(Light), family = "binomial", data = hscrab2)
+
+glm.fit4 = glm(Y ~ Width + factor(Light), family = "binomial", data = hscrab2)
+glm.probs = predict(glm.fit4)
+```
+
+# ROC and AUC
+```{r}
+install.packages("pROC")
+library(pROC)
+proc = roc(hscrab2[, 6], glm.probs)
+plot(1-proc$specificities, proc$sensitivities, type = 'l' )
+segments(0, 0, 1, 1)
+```
+
