@@ -1,0 +1,454 @@
+---
+title: "DEA Workshop 2025"
+author: "Rodrigo Espinoza"
+date: "2025-07-17"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+## Introduction
+
+This R Markdown was designed for the Differential Expression Analysis (DEA) Workshop in the 2025 Statistics Workshop, Academia Sinica.
+The idea is to give you some code for you to have as a blueprint on how to do download, import and analyze this kind of data in RStudio, and then to visualize and interpret the results.
+
+Here, I will compare gene expression from Pancreas and Whole Blood, downloaded from the GTEx Portal.
+
+If you have any questions, please don't hesitate to write me an e-mail at rodespinosas93@gmail.com.
+
+I hope you learn from this workshop!
+
+## Setup
+
+First, we need to set the working directory to the folder where our data is:
+
+```{r set wd}
+
+setwd("C:/Users/rodes/Desktop/DEA_Workshop_2025/") # make sure to use your own PC's address!
+
+```
+
+Some parts of our code need the functions from other packages, so we need to install (if you don't have them) and import those:
+
+```{r install libraries}
+if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+if (!require("edgeR", quietly = TRUE)) BiocManager::install("edgeR")
+if (!require("pheatmap", quietly = TRUE)) install.packages("pheatmap")
+if (!require("dplyr", quietly = TRUE)) install.packages("dplyr")
+```
+
+The previous code meant "if this package is not already installed, install it"
+
+```{r load libraries}
+library(edgeR) # for normalization
+library(pheatmap) # for nice heatmap visualizations
+library(dplyr) # for tidying and managing tables
+```
+
+Now we need to import our data.
+
+## Preprocessing 
+
+```{r import data}
+pancreas.raw <- read.table("gene_reads_pancreas.gct",sep="\t",header = T,skip=2,check.names = F)
+dim(pancreas.raw)
+
+blood.raw <- read.table("gene_reads_whole_blood.gct",sep="\t",header = T,skip=2,check.names = F)
+dim(blood.raw)
+
+```
+
+Pancreas has 59033 rows and 364 columns, and whole blood has 59033 rows and 805 columns.
+
+This data is too big for this workshop, so let's just subset to 100 samples each. You can try later to edit the code and have the whole dataset analyzed.
+
+```{r subset data}
+# Select the first 100 samples from each table
+pancreas.sub <- pancreas.raw[,1:102] 
+dim(pancreas.sub)
+
+blood.sub <- blood.raw[,1:102]
+dim(blood.sub)
+
+# Remove original data to free space
+rm(pancreas.raw,blood.raw)
+```
+
+Now both "sub" tables have 102 columns. The first two columns are gene ids and symbols, and from column 3 to 102, these are samples.
+
+In the "Environment" panel, you will start to see some objects appearing. Click "pancreas.sub" to view it.
+This should open the table in the Code panel.
+
+Sample names are quite long and messy, let's change them into some easier IDs
+
+```{r tidy colnames}
+
+head(colnames(pancreas.sub))
+
+```
+
+We see this "GTEX-111CU-0526-SM-5EGHK" kind of ID's. Let's change them into something like "P001" for Pancreas 1, "P002" for Pancreas 2, until "P100" for Pancreas 100, and same for whole blood (WB001, WB002,...,WB100).
+
+```{r tidy colnames 2}
+colnames(pancreas.sub)[-c(1:2)] <- sprintf("P%03d",1:100)
+colnames(blood.sub)[-c(1:2)] <- sprintf("WB%03d",1:100)
+```
+
+Check your pancreas.sub table to see how it looks like!
+
+Alternatively, 
+
+```{r head table}
+
+head(pancreas.sub[,1:5])
+head(blood.sub[,1:5])
+
+```
+
+I have to select the first 5 columns (1:5) because head will print all columns otherwise, and it would spam our console (try it to see what happens).
+
+Now we still have two tables, we should merge them into one big gene expression table.
+We can do this manually, checking first that all rows are in the same order, and then pasting the tables side by side:
+
+```{r merge tables method 1}
+
+all.equal(pancreas.sub$Name, blood.sub$Name)
+
+```
+
+Since all pancreas Names and blood Names are the same, it means they have the same genes, and they are in the same order.
+We can just paste the tables together:
+
+```{r merge tables method 1 (1)}
+full.table <- cbind(pancreas.sub,blood.sub[,-c(1,2)])
+head(full.table[,c(1:5,103:108)])
+dim(full.table)
+```
+
+202 columns means: the first 2 columns of gene names, 100 pancreas samples and 100 blood samples.
+
+cbind means "column bind". We have to be sure that rows are the same in the tables that we are pasting, which we did with "all.equal" before.
+Also, I removed the first two columns of blood.sub with [,-c(1,2)],  which means "access all columns except the first and second ones".
+
+Alternatively, we can use the "merge" function.
+
+```{r merge tables method 2}
+full.table <- merge(pancreas.sub, blood.sub[,-2], by="Name")
+head(full.table[,c(1:5,103:108)])
+dim(full.table)
+```
+
+The "full.table"s from method 1 and 2 are exactly the same, except that the merge() function already ordered the table by it's "Name" column, lexicographically.
+
+We still need some tidying to be done: we need to remove all columns which have non-numeric values, i.e., Name and Description.
+To do this, we need to change the row names for one of those values, but rownames cannot be duplicated values and usually gene symbols might have duplicates.
+
+```{r check duplicates}
+table(duplicated(full.table$Description))
+
+table(duplicated(full.table$Name))
+```
+
+This means that there are 1180 duplicated gene symbols, but all ENSG IDs are unique.
+Usually we prefer to work with gene symbols, so it's easier to interpret results.
+So let's get rid of duplicated symbols. How?
+
+I will check all rows with duplicated symbols, and take the sum of those rows for each gene.
+I will also remove the ENSG IDs, but first I will store them into a different table to keep it as gene information.
+
+```{r keep gene info}
+gene.info <- full.table[,1:2]
+head(gene.info)
+dim(gene.info)
+```
+ gene.info has all 59k genes, and only two columns, Name and Description (ENGS IDs and Symbols).
+
+```{r address duplicated symbols}
+full.table[,-1] %>%
+  group_by(Description) %>%
+  summarise(across(where(is.numeric),sum)) %>%
+  as.data.frame() -> full.table
+  
+dim(full.table)
+```
+
+I removed the first (ENSG) column with [,-1], and then grouped rows by their Description (symbol), and took the sum of each group.
+If a gene is unique, the sum will be it's own value. If there are duplicated genes, they will be summed.
+
+The result is a table with the number of rows that where unique symbols at the beginning (57,853).
+
+Now we can rename row names, and remove this column to keep only numbers in our table.
+
+```{r change rownames}
+rownames(full.table) <- full.table$Description
+full.table$Description <- NULL
+dim(full.table)
+table(is.na(full.table))
+```
+
+I changed the rownames and removed the symbol column. The result is a table with 57k rows and 200 columns. I also checked that there is no NA value in our table.
+
+Almost done! Now we need to filter out genes. There are several ways to do this, here we will only remove genes which have 0 expression across all samples. 
+
+```{r filter non expressed genes}
+filt.table <- full.table[apply(full.table,1,function(x) sum(x) > 0),]
+dim(filt.table)
+rm(full.table)
+```
+
+We reduced our table size from 57.8k to 52.7k. We could also keep only protein coding genes, or use other filtering criteria (check the FilterByExpr() function of edgeR), but to keep it simple, let's leave it like this. Now we need to prepare our metadata. In this table, we need to list all our samples and their information, for example, P001 is Pancreas and WB001 is Whole Blood. If you have patient data, we would also add Sex, Age, and other descriptions (smoking behavior?, alcohol?, lifestyle?, cancer stage? etc...)
+
+```{r prepare metadata}
+meta <- data.frame(Sample = colnames(filt.table),
+                   Tissue = factor(ifelse(grepl("^P",colnames(filt.table)),"Pancreas","Whole Blood")))
+
+rownames(meta) <- meta$Sample
+
+head(meta)
+tail(meta)
+```
+
+This is a very simple meta data table, but you get the idea. So now we finally have our data tidied up, and we can proceed to normalization and next steps!
+
+## Normalization
+
+The normalization process deals with differences in sequencing batches, library sizes, and sometimes gene lengths.
+The method we are using today is called Trimmed M-means normalization (TMM), and it's the method used by edgeR package.
+It's optimized for RNA-seq read counts, so the input should be raw counts, not some other already normalized form (like CPM, TPM or others).
+
+edgeR works with an object called DGEList, and we need to create one.
+
+```{r edgeR DGEList}
+dge <- DGEList(counts = filt.table,
+               samples = meta,
+               group = meta$Tissue)
+```
+
+The DGEList object grabs all the information we prepared before, and keeps it in one object for easier managing.
+We need to give it a counts table, some sample information, and which groups we want to compare.
+
+Now we can do our normalization.
+
+```{r edgeR normalization}
+dge <- calcNormFactors(dge)
+logCPM <- cpm(dge, log = T, prior.count = 1, normalized.lib.sizes = T)
+```
+
+Briefly, we calculated the normalization factors for each sample, using the TMM method from edgeR, and then we extracted the log-Counts per Million values. We need to log it so that extreme values don't skew the range. However, some genes might have 0 expression in some samples, and if we log(0), we will have an error. This is what prior.count = 1 fixes. We add +1 to the whole table so that there is no log(0), this is also called "pseudo-count". Finally, we want to make sure that the extracted table is already normalized, so we use the "normalized.lib.sizes=T" argument.
+
+This table can now be processed for Exploratory Analysis and Differential Expression Analysis.
+
+## Exploratory Analysis
+
+Let's start with Principal Component Analysis.
+This is a mathematical method to find which combination of genes have the most variability in our data.
+The larger the variability the better, because we can make sure that samples are very different in these genes.
+
+So let's perform PCA.
+
+```{r Principal Component Analysis}
+# PCA
+pca.data <- prcomp(t(logCPM))
+pca.var <- round(pca.data$sdev^2/sum(pca.data$sdev^2)*100,1)
+pca.var[1:2]
+
+pca.df <- data.frame(Sample = rownames(pca.data$x),
+                     X = pca.data$x[,1],
+                     Y = pca.data$x[,2],
+                     Tissue = meta$Tissue)
+
+head(pca.df)
+
+# Visualize PCA
+
+plot(pca.df$X,pca.df$Y,
+     main = "Principal component analysis (PCA) - scatterplot",
+     cex.main=1,
+     xlab = paste0("PC1 - ",pca.var[1],"%"),
+     ylab=paste0("PC2 - ",pca.var[2],"%"),
+     col = c("gold","indianred")[as.numeric(pca.df$Tissue)],
+     pch=19
+     )
+
+legend("center",
+       legend=c("Pancreas","Whole blood"),
+       col=c("gold","indianred"),
+       pch=19)
+
+```
+
+It is pretty clear that these are two very different tissues, and so it makes sense that there is quite different gene expression across them:
+- Across the x-axis (PC1), there is a 61.2% of the variance of the data set that is explained due to the differences in these tissues.
+- Across the y-axis (PC2), there is a 5.4% of variance explained, and we can see that pancreatic samples are much more similar between them than blood cells. This makes sense, since there is a very diverse population of blood cells, compared to types of pancreatic cells, and we can expect that these blood cells express different sets of genes even among each other.
+
+If you  want to learn more about PCA, I highly recommend Josh Starmer's Stat Quest content (https://statquest.org/), where he describes in detail and in a very friendly manner this and other methods used in RNA-seq and other bioinformatic experiments.
+
+Next, can we identify which genes are differentially expressed?
+
+## Differential Expression Analysis (DEA)
+
+Since we are comparing the expression between two groups, this fits a two-sample test comparison. If we assume that the distribution of the compared sets is normal, we could use a t-test. If we don't want to assume any distribution, we can use a Wilcoxon rank sum test. 
+
+Note: These samples are not paired, meaning that each two pairs of tissues are not the pancreatic and blood tissues from the same patient, so we need to use unpaired methods.
+
+```{r DEA Wilcoxon}
+p.values <- apply(logCPM,1,function(x) wilcox.test(x ~ meta$Tissue)$p.value)
+
+table(p.values < 0.05)
+```
+
+We see that 34k genes seem to be DE, however, we repeated the same test 52.7k times! Therefore we cannot use the resulting p-values to assess true genes that are differentially expressed across these tissues. According to the definition of p-value, 5% of these p-values could be there just by chance!
+
+So we need to correct these p-values for multiple comparisons. The method we use for this is the "Benjamini-Hochberg" or "False Discovery Rate, FDR".
+
+```{r adjust p-values}
+p.adj <- p.adjust(p.values,method = "fdr")
+table(p.adj < 0.05)
+```
+
+Since the signal is so strong, as seen in our PCA, the number of genes with FDR < 0.05 is still over 30 thousand! How can we select genes that are not only statistical, but also biologically significant? We also check for the log(fold-change), or logFC, which is the log2 of the ratio between the expression of one tissue vs. the other.
+
+```{r calculate logFCs}
+
+logFC <- apply(logCPM,1,function(x) mean(x[meta$Tissue == "Whole Blood"]) - mean(x[meta$Tissue == "Pancreas"]))
+
+table(logFC > 1 , p.adj < 0.05)
+table(logFC < -1,  p.adj < 0.05)
+
+```
+
+Note: in the log-scale, a division or fraction is represented as a subtraction:
+
+A/B = logA - logB
+
+That is why we used mean(WB) - mean(P)
+
+The table() functions below show that there are 7.3k genes that are up-regulated in blood, compared to Pancreas, and 10.6k genes that are down-regulated. It is important to keep in mind the direction of our comparison! This means:
+- if we did log(blood) - log(pancreas), positive logFC's will represent upregulated genes in BLOOD.
+- if we did log(pancreas) - log(blood), positive logFC's will represent upregulated genes in PANCREAS.
+
+How can we visualize these results? We use a volcano plot.
+A volcano plot has the logFC values in the x-axis, and the -log10 of adjusted p-values in the  y-axis. Differentially expressed genes will be on the right-most, left-most and top extremes of the plot:
+
+
+```{r volcano plot}
+
+plot(logFC,     -log10(p.adj),
+     main="Volcano plot of Blood/Pancreas gene expression",
+     cex.main=1,cex=0.8,
+     xlab = "logFC (blood/pancreas)",
+     ylab = "-log10(FDR)")
+
+points(logFC[logFC > 1 & p.adj < 0.05],
+       -log10(p.adj)[logFC > 1 & p.adj < 0.05],
+       col="red",cex=0.8)
+
+points(logFC[logFC < -1 & p.adj < 0.05],
+       -log10(p.adj)[logFC < -1 & p.adj < 0.05],
+       col="gold",cex=0.8)
+
+```
+
+Genes that are over-expressed in whole blood are displayed in red, and genes that are over-expressed in pancreas are in yellow.
+
+Another way to visualize this is using heatmaps. Here, we can cluster similar genes and similar samples together, and see if there is a clear distinction between these groups expression.
+
+A heatmap is a heavy plot to render, so I will just use the top 500 most extreme logFC's to visualize it.
+
+```{r select top genes}
+sorted.logFC <- sort(logFC)
+de.genes <- names(c(head(sorted.logFC,n=250),tail(sorted.logFC,n=250)))
+head(de.genes)
+```
+
+I sorted the logFC values, and selected the highest 250 (over expressed in blood), and the lowest 250 (over expressed in pancreas).
+
+```{r heatmap}
+pheatmap(logCPM[de.genes,],
+         main="Heatmap of top 500 DEGs in Pancreas vs. Whole Blood",
+         scale="row",
+         cluster_rows = T, cluster_cols = T,
+         show_rownames = F, show_colnames = F,
+         clustering_method = "ward.D",
+         color = colorRampPalette(c("navy","white","indianred"))(100),
+         annotation_col = data.frame(row.names = meta$Sample,Tissue = meta$Tissue),
+         annotation_colors = list("Tissue"=c("Pancreas"="gold","Whole Blood"="red")))
+
+```
+
+We see that the top 500 most DE'd genes are very very different between these tissues! Each column in the heatmap is a sample, and each row is a gene. Cells in red color means they are highly expressed, while blue are lowly expressed. White cells means no differential expression. Since we selected the top 500 most DEGs, we see a very clear trend, and a very clear separation in the cluser dendrograms in both, rows and columns.
+
+
+These are good results, but, what are these genes? How do they work? Do they work together? What pathways are activated or turned off?
+
+## Over representation analysis - Gene ontology
+
+A simple way to annotate these DE genes is by using Over-representation analysis (ORA). This is a statistical method that uses a hypergeometrical distribution to assess whether the presence of our DE genes in a set of genes (e.g., insulin production) could happen just by chance.
+
+We can do this in R, but there are several websites that can help us do the work in a very robust way. So we will just write a text file with our gene names, and upload those gene names to this database.
+
+STRING-PPI is a database that annotates every known protein-protein interaction, and has several analytical tools, like ORA.
+
+```{r write DEG text files}
+
+pancreas.degs <- names(head(sorted.logFC,n=250))
+blood.degs <- names(tail(sorted.logFC,n=250))
+
+write.table(pancreas.degs,file="pancreas.degs.txt",sep="\t",quote = F,col.names = F,
+            row.names = F)
+
+write.table(blood.degs,file="blood.degs.txt",sep="\t",quote = F,col.names = F,
+            row.names = F)
+
+```
+
+We saved our top 250 DEGs for pancreas and blood, respectively. Check the slides to proceed with STRING-PPI annotations!
+
+## Conclusion
+
+I hope this material helped you to understand the basics of differential gene expression analysis, and that this code is a useful blueprint to do your own.
+
+This is not an exhaustive tutorial, and there are much more details to be discussed for a complete RNA-seq processing experiment and analysis. I referenced other tutorials and resources in the slides, please check them out if you're interested in learning more!
+
+All the best,
+Rodrigo
+
+## Extra
+
+We can also use a selection method to choose only the most variable genes, by selecting the top X genes with the highest coefficient of variation (CV). This will ensure that we remove most of the noise from the data and get the strongest biological signals.
+
+The coefficient of variation, or CV, is calculated by taking the ratio between a gene's standard deviation and its mean.
+
+Here, I calculated CV for every gene, and then sorted their absolute values and selected the top 3,000 highest.
+
+```{r top 3k CV genes, eval=FALSE, include=TRUE}
+cvs <- apply(logCPM,1,function(x) sd(x)/mean(x))
+top.3k.genes <- names(cvs[head(sort(abs(cvs),decreasing = T),n=3000)])
+
+pca.data <- prcomp(t(logCPM[top.5k.genes,]))
+pca.var <- round(pca.data$sdev^2/sum(pca.data$sdev^2)*100,1)
+pca.var[1:2]
+
+pca.df <- data.frame(Sample = rownames(pca.data$x),
+                     X = pca.data$x[,1],
+                     Y = pca.data$x[,2],
+                     Tissue = meta$Tissue)
+
+head(pca.df)
+
+# Visualize PCA
+
+plot(pca.df$X,pca.df$Y,
+     main = "Principal component analysis (PCA) top 3k CV genes - scatterplot",
+     cex.main=1,
+     xlab = paste0("PC1 - ",pca.var[1],"%"),
+     ylab=paste0("PC2 - ",pca.var[2],"%"),
+     col = c("gold","indianred")[as.numeric(pca.df$Tissue)],
+     pch=19
+     )
+
+legend("bottom",
+       legend=c("Pancreas","Whole blood"),
+       col=c("gold","indianred"),
+       pch=19)
+```

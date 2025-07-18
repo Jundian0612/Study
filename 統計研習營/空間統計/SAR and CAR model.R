@@ -7,12 +7,12 @@ library(sp)
 library(sf)
 library(terra)
 
-nc <- st_read("C:/Users/User/OneDrive/桌面/統計研習營/[更新]R-code and data/R-code and data/data/gadm41_TWN_2.shp")
+nc <- st_read("C:/Users/User/OneDrive/桌面/統計研習營/空間統計/data/gadm41_TWN_2.shp")
 
 #---------------Rainfall---------------
 #----- Import Data -----
 # Set working directory
-setwd("C:/Users/User/OneDrive/桌面/統計研習營/[更新]R-code and data/R-code and data/data")
+setwd("C:/Users/User/OneDrive/桌面/統計研習營/空間統計/data")
 
 # Read the rainfall data for 2021
 dr_2021 <- read.csv("dr_2021.csv")  # 1471 x 368
@@ -151,7 +151,7 @@ ggplot(shp_merged) +
 
 #--------------- Temperature ---------------
 #--- Import Data ---
-setwd("C:/Users/User/OneDrive/桌面/統計研習營/[更新]R-code and data/R-code and data/data")
+setwd("C:/Users/User/OneDrive/桌面/統計研習營/空間統計/data")
 tpname <- paste("temp", 1:25, ".csv", sep = "")
 tp <- c()
 for (i in 1:25){tp[[i]] <- read.csv(tpname[i])}
