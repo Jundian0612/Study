@@ -1,0 +1,237 @@
+---
+title: "project3"
+author: "郭芊妮"
+date: "2025-07-24"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE,message=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE,massage=FALSE,fig.height = 6, fig.width = 10,fig.show = "hold",dpi= 300,dev= "png")
+```
+
+```{r}
+library(forecast)
+library(CCA)
+library(CCP)
+library(boot)
+library(ggplot2)
+library(ggfortify)
+library(tseries)
+library(vars)      # VAR 模型
+library(urca)      # 單位根檢定（如果需要）
+library(gridExtra)
+library(tidyr)
+library(dplyr)
+```
+data_20250725.csv:
+列（row）：
+  第1列：全震級地震次數（192個月）
+  第2–5列：四個 GNSS 站的垂直位移（月度，192個月）
+  第6–102列：九十七個地下水位站的水位異常值（月度，192個月）
+  第103列：震級≥3.6的地震次數（192個月）
+欄（column）：
+  第1欄：經度
+  第2欄：緯度
+  第3–194欄：對應自2006年1月到2021年12月的192個月度資料
+```{r}
+data_20250725 <- read.csv("C:/Users/user/OneDrive/Desktop/information/20250725.csv",
+                          head = FALSE)
+data_eq_coor <- read.csv("C:/Users/user/OneDrive/Desktop/information/20250725_eq_coor.csv",head=FALSE)
+colnames(data_eq_coor) <- c("Year", "Month", "Longitude", "Latitude", "Magnitude")
+# 地下水位矩陣（97 站 × 192 月）
+gw_mat <- t(as.matrix(data_20250725[6:102,3:194]))
+colnames(gw_mat) <- c(1:97)
+rownames(gw_mat) <- c(1:192)
+# GNSS 垂直位移矩陣（4 站 × 192 月）
+gns_mat<- t(as.matrix(data_20250725[2:5,3:194]))
+colnames(gns_mat) <- c(1:4)
+rownames(gns_mat) <- c(1:192)
+dates  <- seq(as.Date("2006-01-01"), as.Date("2021-12-01"), by="month")
+matplot(dates,gw_mat,type="l",col=rainbow(ncol(gw_mat)),xlab="Times",main="Time Plot of grandwater")
+matplot(dates,gns_mat,type="l",col=rainbow(ncol(gns_mat)),xlab="Times",main="Time Plot of GNS")
+```
+
+# Tack A
+```{r}
+# 1. 執行 PCA
+# scale.=TRUE：先把每個變數（站點）標準化成均值 0、標準差 1
+pca_gw  <- prcomp(gw_mat,  scale. = TRUE) 
+pca_gns <- prcomp(gns_mat, scale. = TRUE)
+# 2. 檢視結果
+# pca$x：主成分分數，每列對應一個月，每欄對應一個成分
+# pca$rotation：載荷向量（loadings），每列對應原始變數（站點），每欄對應成分
+# pca$sdev：各主成分的標準差，其平方即為特徵值
+
+# 檢視地下水 PCA 摘要
+summary(pca_gw)
+# 檢視 GNSS PCA 摘要
+summary(pca_gns)
+# 3. 畫 Scree Plot（折線圖）看解釋變異量
+# 地下水
+plot(pca_gw, type="l", main="地下水位 PCA Scree Plot")
+# GNSS
+plot(pca_gns, type="l", main="GNSS 位移 PCA Scree Plot")
+
+# 4. 畫累積解釋變異量
+# 地下水
+cumvar_gw <- cumsum(pca_gw$sdev^2) / sum(pca_gw$sdev^2)
+plot(cumvar_gw, type="b", xlab="成分序號", ylab="累積解釋變異量",
+     main="地下水位 累積解釋變異量")
+abline(h=0.8, lty=2)   # 例如 80% 解釋變異量參考線
+
+# 2. 修正 PC1 方向（保證正值＝上升）
+mean_ld_gw  <- mean(pca_gw$rotation[,1])
+mean_ld_gns <- mean(pca_gns$rotation[,1])
+Zx <- if(mean_ld_gw  < 0) -pca_gw$x[,1] else pca_gw$x[,1]
+Zy <- pca_gns$x[,1]
+
+#相關性測試
+shapiro.test(Zx)
+shapiro.test(Zy)
+qqnorm(Zx); qqline(Zx)
+qqnorm(Zy); qqline(Zy)
+#他們不符合常態分佈
+
+# 3. 單尾負相關檢定（H1: τ < 0）
+res_test <- cor.test(Zx, Zy,method= "kendall")
+print(res_test)
+#p.value不顯著，但他們的相關性是-.03141
+
+plot(Zx, Zy,
+     xlab = "地下水 PC1 分數（正向＝水位上升）",
+     ylab = "GNSS PC1 分數（正向＝位移上升）",
+     main = "Zx vs. Zy 散佈圖")
+abline(lm(Zy ~ Zx), col = "blue")
+
+# 分割資料：前 96 與後 96
+gw_half1  <- gw_mat[1:96, ]
+gw_half2  <- gw_mat[97:192, ]
+gns_half1 <- gns_mat[1:96, ]
+gns_half2 <- gns_mat[97:192, ]
+
+# 做 PCA（每組都標準化）
+pca_gw1  <- prcomp(gw_half1, scale. = TRUE)
+pca_gw2  <- prcomp(gw_half2, scale. = TRUE)
+pca_gns1 <- prcomp(gns_half1, scale. = TRUE)
+pca_gns2 <- prcomp(gns_half2, scale. = TRUE)
+
+# 修正 PC1 方向（同你原本做法）
+Zx1 <- if(mean(pca_gw1$rotation[,1]) < 0) -pca_gw1$x[,1] else pca_gw1$x[,1]
+Zx2 <- if(mean(pca_gw2$rotation[,1]) < 0) -pca_gw2$x[,1] else pca_gw2$x[,1]
+Zy1 <- pca_gns1$x[,1]
+Zy2 <- pca_gns2$x[,1]
+
+# 做 Kendall 相關性檢定
+test1 <- cor.test(Zx1, Zy1, method = "kendall", alternative = "less")
+test2 <- cor.test(Zx2, Zy2, method = "kendall", alternative = "less")
+
+print(test1)
+print(test2)
+
+# 畫出對比圖
+par(mfrow = c(1,2))
+plot(Zx1, Zy1, main = "前半段 Zx vs Zy", xlab = "GW PC1", ylab = "GNSS PC1")
+abline(lm(Zy1 ~ Zx1), col = "blue")
+plot(Zx2, Zy2, main = "後半段 Zx vs Zy", xlab = "GW PC1", ylab = "GNSS PC1")
+abline(lm(Zy2 ~ Zx2), col = "blue")
+```
+
+# Task B
+```{r}
+pacf(Zy)
+fit1 <- arima(Zy,order = c(1,0,0))
+summary(fit1)
+Box.test(residuals(fit1),lag=12,type="Ljung-Box")
+fit2 <- arima(Zy,order = c(2,0,0))
+summary(fit2)
+Box.test(residuals(fit2),lag=12,type="Ljung-Box")
+fit3 <- arima(Zy,order = c(3,0,0))
+summary(fit3)
+Box.test(residuals(fit3),lag=12,type="Ljung-Box")
+fit3.0 <- arima(Zy,order = c(3,0,0),fixed = c(NA, NA, NA, 0))
+summary(fit3.0)
+Box.test(residuals(fit3.0),lag=12,type="Ljung-Box")
+
+################
+acf(Zx)
+pacf(Zx)
+adf.test(Zx)
+kpss.test(Zx)
+fitx <- arima(Zy,order = c(3,1,0))
+summary(fitx)
+Box.test(residuals(fitx),lag=12,type="Ljung-Box")
+################
+
+# 1. 把 Zx 變成 xreg
+xreg_mat <- matrix(Zx, ncol = 1)
+colnames(xreg_mat) <- "Zx"
+
+# 2. 建 ARIMAX(3,0,0)，只估 Zx 的影響
+fit_x1 <- arima(Zy,
+                order = c(3,0,0),
+                xreg  = xreg_mat,
+                fixed = c(NA, NA, NA, 0, NA))
+# fixed 參數順序：phi1, phi2, phi3, intercept=0, beta_Zx
+summary(fit_x1)
+#外生變數Zx並沒有顯著
+tsdiag(fit_x1)
+Box.test(residuals(fit_x1),lag=12,type="Ljung-Box")
+acf(residuals(fit_x1), main="Residual ACF")
+pacf(residuals(fit_x1), main="Residual PACF")
+
+# 穩健性建立
+Zy_early <- Zy[1:96]
+Zy_late  <- Zy[97:192]
+
+xreg_early <- xreg_mat[1:96, , drop = FALSE]
+xreg_late  <- xreg_mat[97:192, , drop = FALSE]
+
+fit_early <- arima(Zy_early, order = c(3,0,0), xreg = xreg_early, fixed = c(NA, NA, NA, 0, NA))
+fit_late  <- arima(Zy_late,  order = c(3,0,0), xreg = xreg_late,  fixed = c(NA, NA, NA, 0, NA))
+
+summary(fit_early)
+summary(fit_late)
+
+# 模型係數與標準誤資料
+labels <- c("ar1", "ar2", "ar3", "Zx")
+
+coef_early <- c(0.3062, 0.2323, 0.4318, 0.0087)
+se_early   <- c(0.0925, 0.0943, 0.0921, 0.0092)
+
+coef_late  <- c(0.3462, 0.3420, 0.2797, 0.0051)
+se_late    <- c(0.0974, 0.0977, 0.0981, 0.0105)
+
+# 整理資料成 tidy 形式
+df <- tibble(
+  term = rep(labels, 2),
+  period = rep(c("2006–2013", "2014–2021"), each = 4),
+  coef = c(coef_early, coef_late),
+  se = c(se_early, se_late)
+)
+
+# 畫圖
+ggplot(df, aes(x = term, y = coef, fill = period)) +
+  geom_bar(stat = "identity", position = position_dodge(0.7), width = 0.6) +
+  geom_errorbar(aes(ymin = coef - se, ymax = coef + se),
+                position = position_dodge(0.7), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  labs(
+    title = "AR(3) + Zx 模型係數比較（含標準誤）",
+    x = "變數", y = "估計係數"
+  ) +
+  scale_fill_manual(values = c("#1f77b4", "#ff7f0e")) +
+  theme_minimal(base_size = 14)
+```
+
+# Task C
+```{r}
+Zy_seasdiff <- diff(Zy, lag = 12)
+acf(Zy_seasdiff); pacf(Zy_seasdiff)
+
+fit3.0.1 <- arima(Zy,order = c(3,0,0),xreg  = xreg_mat,fixed = c(NA,NA,NA,NA,0,NA),
+              seasonal = list(order = c(0, 0, 1),period = 12))
+summary(fit3.0.1)
+```
+
